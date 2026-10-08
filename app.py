@@ -137,11 +137,11 @@ button{width:100%;padding:13px;border:0;border-radius:10px;background:#4f8cff;co
 .err{color:#ff6b6b;font-size:12px;margin-bottom:12px}
 </style></head><body><div class="card">
 <h1>MCP Authorization</h1>
-<p>Server: <b>{issuer}</b><br>Client: <b>{client}</b><br>Scope: <code>{scope}</code></p>
-{fail}
+<p>Server: <b>__ISSUER__</b><br>Client: <b>__CLIENT__</b><br>Scope: <code>__SCOPE__</code></p>
+__FAIL__
 <form method="post" action="/login">
 <input type="password" name="password" placeholder="Senha de administrador" autofocus>
-<input type="hidden" name="state" value="{state}">
+<input type="hidden" name="state" value="__STATE__">
 <button type="submit">Entrar e continuar</button>
 </form></div></body></html>"""
 
@@ -154,10 +154,24 @@ a{display:inline-block;margin:8px 4px 0;padding:12px 24px;border-radius:10px;tex
 .yes{background:#2ea043;color:#fff}.no{background:#2a3550;color:#e8edf7}
 </style></head><body><div class="card">
 <h1>Autorizar acesso MCP?</h1>
-<p>O cliente <b>{client}</b> pede escopo <code>{scope}</code>.<br>Isso permite acessar as ferramentas do servidor MCP.</p>
-<a class="yes" href="/approve?state={state}">Autorizar</a>
-<a class="no" href="/deny?state={state}">Negar</a>
+<p>O cliente <b>__CLIENT__</b> pede escopo <code>__SCOPE__</code>.<br>Isso permite acessar as ferramentas do servidor MCP.</p>
+<a class="yes" href="/approve?state=__STATE__">Autorizar</a>
+<a class="no" href="/deny?state=__STATE__">Negar</a>
 </div></body></html>"""
+
+def render_login(issuer: str, client: str, scope: str, fail: str, state: str) -> str:
+    return (LOGIN_PAGE
+        .replace("__ISSUER__", issuer)
+        .replace("__CLIENT__", client)
+        .replace("__SCOPE__", scope)
+        .replace("__FAIL__", fail)
+        .replace("__STATE__", state))
+
+def render_consent(client: str, scope: str, state: str) -> str:
+    return (CONSENT_PAGE
+        .replace("__CLIENT__", client)
+        .replace("__SCOPE__", scope)
+        .replace("__STATE__", state))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -290,7 +304,7 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
                                  "state": state,
                                  "verifier": query.get("code_challenge", ""),
                                  "method": query.get("code_challenge_method", "S256")}
-        self._send(*html_response(200, LOGIN_PAGE.format(
+        self._send(*html_response(200, render_login(
             issuer=ISSUER, client=client["name"], scope=query.get("scope", "mcp:read"),
             fail="", state=state)), {"Set-Cookie": f"mcp_session={cookie}; Path=/; HttpOnly; SameSite=Lax"})
 
@@ -309,13 +323,13 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
         import urllib.parse as up
         fields = {k: up.unquote(v) for k, v in fields.items()}
         if fields.get("password") != ADMIN_PASS:
-            self._send(*html_response(200, LOGIN_PAGE.format(
+            self._send(*html_response(200, render_login(
                 issuer=ISSUER, client=sess["client_id"], scope=sess["scope"],
                 fail="<div class='err'>Senha incorreta</div>", state=sess["state"])))
             return
         with _lock:
             _sessions[cookie]["authenticated"] = True
-        self._send(*html_response(200, CONSENT_PAGE.format(
+        self._send(*html_response(200, render_consent(
             client=sess["client_id"], scope=sess["scope"], state=sess["state"])))
 
     def _consent(self, query: dict, approved: bool):
