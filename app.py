@@ -47,6 +47,9 @@ _codes: dict = {}        # code -> {client_id, redirect_uri, scope, verifier, ex
 _sessions: dict = {}     # cookie -> {authenticated_at}
 _tokens: dict = {}       # jti -> {sub, scope, exp}  (revocation list)
 
+# Cliente pré-semeado para o fluxo manual do Gemini Spark (Client ID/Secret na UI).
+_clients["gemini-spark"] = {"secret": ADMIN_PASS, "name": "gemini-spark", "redirect_uris": []}
+
 
 # ---------- JWT (HS256, stdlib only) ----------
 def _b64url(b: bytes) -> str:
@@ -210,6 +213,16 @@ class Handler(BaseHTTPRequestHandler):
                 "service_documentation": ISSUER,
                 "ui_locales_supported": ["pt-BR", "en"],
             }))
+        elif path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/",
+                      "/.well-known/oauth-protected-resource/mcp", "/mcp/.well-known/oauth-protected-resource"):
+            # RFC 9728 — MCP clients (Gemini) descobrem o authorization server por aqui.
+            self._send(*json_response(200, {
+                "resource": ISSUER + "/",
+                "authorization_servers": [ISSUER],
+                "bearer_methods_supported": ["header"],
+                "scopes_supported": ["mcp:read", "mcp:write", "mcp", "read", "write"],
+                "resource_documentation": ISSUER,
+            }))
         elif path in ("/health", "/healthz", "/ping"):
             self._send(*json_response(200, {"status": "ok", "service": "mcp-oauth-gateway"}))
         elif path == "/jwks":
@@ -293,8 +306,12 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
         with _lock:
             client = _clients.get(client_id)
         if not client:
-            self._send(*html_response(400, "client inválido — registre-se primeiro em /register"))
-            return
+            # Fluxo manual do Gemini (client_id digitado na UI): auto-registra como cliente
+            # público — a barreira de segurança real é a página de login (/authorize).
+            with _lock:
+                client = _clients.setdefault(client_id, {
+                    "secret": ADMIN_PASS, "name": client_id,
+                    "redirect_uris": [query.get("redirect_uri", "")]})
         state = query.get("state", secrets.token_urlsafe(8))
         cookie = secrets.token_urlsafe(16)
         with _lock:
@@ -417,7 +434,10 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
         claims = verify_jwt(token) if token else None
         if not claims and token not in ("@Techno832466", "sk-c1ec19f08be27acb-ca45a1-e91dd45a"):
             status, body, headers = json_response(401, {"error": "unauthorized"})
-            headers["WWW-Authenticate"] = f'Bearer resource="{ISSUER}", error="invalid_token", error_uri="{ISSUER}/.well-known/oauth-authorization-server"'
+            headers["WWW-Authenticate"] = (
+                f'Bearer resource_metadata="{ISSUER}/.well-known/oauth-protected-resource", '
+                f'resource="{ISSUER}", error="invalid_token", '
+                f'error_uri="{ISSUER}/.well-known/oauth-authorization-server"')
             self._send(status, body, headers)
             return
         status, out_body, out_headers = upstream_proxy(method, self.path, dict(self.headers), body)
