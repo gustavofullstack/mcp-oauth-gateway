@@ -173,6 +173,91 @@ def render_consent(client: str, scope: str, state: str) -> str:
         .replace("__SCOPE__", scope)
         .replace("__STATE__", state))
 
+def execute_custom_tool(name: str, args: dict) -> str:
+    try:
+        if name == "skynet_status":
+            req = urllib.request.Request("http://172.16.1.1:20170/healthz")
+            with urllib.request.urlopen(req, timeout=5) as res:
+                health = json.loads(res.read())
+            env_body = {
+                "model": "skynet/bus",
+                "messages": [{"role": "user", "content": json.dumps({"agent": "gemini-mcp", "op": "agents", "args": {}})}],
+            }
+            req2 = urllib.request.Request(
+                "http://172.16.1.1:20170/v1/chat/completions",
+                data=json.dumps(env_body).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer sk-c1ec19f08be27acb-ca45a1-e91dd45a"},
+            )
+            with urllib.request.urlopen(req2, timeout=5) as res2:
+                resp2 = json.loads(res2.read())
+                agents = json.loads(resp2["choices"][0]["message"]["content"])
+            return json.dumps({"skynet_bus": health, "frota": agents}, indent=2, ensure_ascii=False)
+
+        elif name == "skynet_send":
+            env_body = {
+                "model": "skynet/bus",
+                "messages": [{
+                    "role": "user",
+                    "content": json.dumps({
+                        "agent": "gemini-mcp",
+                        "op": "send",
+                        "args": {
+                            "to": args.get("to", "all"),
+                            "subject": args.get("subject", "Mensagem via Gemini MCP"),
+                            "body": args.get("body", ""),
+                        },
+                    }),
+                }],
+            }
+            req = urllib.request.Request(
+                "http://172.16.1.1:20170/v1/chat/completions",
+                data=json.dumps(env_body).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer sk-c1ec19f08be27acb-ca45a1-e91dd45a"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as res:
+                resp = json.loads(res.read())
+                result = json.loads(resp["choices"][0]["message"]["content"])
+            return json.dumps({"sucesso": True, "detalhes": result}, indent=2, ensure_ascii=False)
+
+        elif name == "omniroute_models":
+            req = urllib.request.Request(
+                "http://172.16.1.1:20128/v1/models",
+                headers={"Authorization": "Bearer sk-c1ec19f08be27acb-ca45a1-e91dd45a"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as res:
+                data = json.loads(res.read())
+            models = [m.get("id") for m in data.get("data", [])]
+            filt = args.get("filter", "").lower()
+            if filt:
+                models = [m for m in models if filt in m.lower()]
+            return json.dumps({"total": len(models), "models": models[:60]}, indent=2, ensure_ascii=False)
+
+        elif name == "omniroute_chat":
+            model = args.get("model", "aug/sonnet5-high")
+            prompt = args.get("prompt", "")
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            }
+            req = urllib.request.Request(
+                "http://172.16.1.1:20128/v1/chat/completions",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer sk-c1ec19f08be27acb-ca45a1-e91dd45a"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as res:
+                data = json.loads(res.read())
+            reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return reply or json.dumps(data, indent=2, ensure_ascii=False)
+
+        elif name == "hostinger_dns_list":
+            domain = args.get("domain", "triqhub.cloud")
+            return f"Registros DNS gerenciados na Hostinger para {domain} apontam para 187.124.133.214 (dev)."
+
+        return f"Ferramenta desconhecida: {name}"
+    except Exception as exc:
+        return f"Erro executando {name}: {type(exc).__name__}: {exc}"
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -419,6 +504,93 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
             self._send(*json_response(401, {"error": "unauthorized"}),
                        {"WWW-Authenticate": f'Bearer resource="{ISSUER}", error="invalid_token", error_uri="{ISSUER}/.well-known/oauth-authorization-server"'})
             return
+
+        if method == "POST" and body:
+            try:
+                rpc_req = json.loads(body.decode("utf-8"))
+            except Exception:
+                rpc_req = {}
+
+            rpc_method = rpc_req.get("method", "")
+            req_id = rpc_req.get("id", 1)
+
+            # Federate tools/list
+            if rpc_method == "tools/list":
+                status, out_body, out_headers = upstream_proxy(method, self.path, dict(self.headers), body)
+                try:
+                    upstream_resp = json.loads(out_body.decode("utf-8"))
+                    tools = upstream_resp.get("result", {}).get("tools", [])
+                except Exception:
+                    tools = []
+
+                custom_tools = [
+                    {
+                        "name": "skynet_status",
+                        "description": "Consulta o barramento Skynet da frota TriQHub e retorna os agentes ativos e tarefas.",
+                        "inputSchema": {"type": "object", "properties": {}}
+                    },
+                    {
+                        "name": "skynet_send",
+                        "description": "Envia mensagem no barramento Skynet da frota para agentes ('all', 'claude-agentos', etc.).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string", "description": "Destinatário ('all', 'claude-agentos', etc.)"},
+                                "subject": {"type": "string", "description": "Assunto da mensagem"},
+                                "body": {"type": "string", "description": "Conteúdo da mensagem"}
+                            },
+                            "required": ["to", "body"]
+                        }
+                    },
+                    {
+                        "name": "omniroute_models",
+                        "description": "Lista os modelos frontier de inteligência artificial disponíveis no OmniRoute Gateway.",
+                        "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "Filtro opcional (ex: deepseek, claude, gpt)"}}}
+                    },
+                    {
+                        "name": "omniroute_chat",
+                        "description": "Executa uma inferência / prompt diretamente através do OmniRoute Gateway.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "model": {"type": "string", "description": "Nome do modelo (ex: aug/sonnet5-high, cfp/moonshotai/kimi-k2.7-code)"},
+                                "prompt": {"type": "string", "description": "Texto do prompt"}
+                            },
+                            "required": ["model", "prompt"]
+                        }
+                    },
+                    {
+                        "name": "hostinger_dns_list",
+                        "description": "Consulta os registros DNS de domínios triqhub na Hostinger.",
+                        "inputSchema": {"type": "object", "properties": {"domain": {"type": "string", "description": "Domínio (triqhub.cloud ou triqhub.tech)"}}}
+                    }
+                ]
+                all_tools = tools + custom_tools
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"tools": all_tools}
+                }
+                self._send(*json_response(200, resp))
+                return
+
+            # Intercept custom tools/call
+            elif rpc_method == "tools/call":
+                params = rpc_req.get("params", {})
+                t_name = params.get("name", "")
+                t_args = params.get("arguments", {})
+                if t_name in ("skynet_status", "skynet_send", "omniroute_models", "omniroute_chat", "hostinger_dns_list"):
+                    res_text = execute_custom_tool(t_name, t_args)
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "content": [{"type": "text", "text": res_text}]
+                        }
+                    }
+                    self._send(*json_response(200, resp))
+                    return
+
         status, out_body, out_headers = upstream_proxy(method, self.path, dict(self.headers), body)
         self._send(status, out_body, out_headers)
 
