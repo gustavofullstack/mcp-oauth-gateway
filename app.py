@@ -321,9 +321,11 @@ ul{{padding-left:20px;color:#9fb0c9;font-size:13px;line-height:1.8}}
                                  "state": state,
                                  "verifier": query.get("code_challenge", ""),
                                  "method": query.get("code_challenge_method", "S256")}
-        self._send(*html_response(200, render_login(
+        status, body, headers = html_response(200, render_login(
             issuer=ISSUER, client=client["name"], scope=query.get("scope", "mcp:read"),
-            fail="", state=state)), {"Set-Cookie": f"mcp_session={cookie}; Path=/; HttpOnly; SameSite=Lax"})
+            fail="", state=state))
+        headers["Set-Cookie"] = f"mcp_session={cookie}; Path=/; HttpOnly; SameSite=Lax"
+        self._send(status, body, headers)
 
     def _login(self, body: bytes):
         cookie = self._cookie()
